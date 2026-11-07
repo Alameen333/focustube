@@ -1,84 +1,113 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#101114">
-  <meta name="description" content="A calm, channel-approved YouTube library.">
+  <meta name="description" content="Your personal, distraction-free YouTube library.">
   <title>FocusTube</title>
-  <link rel="manifest" href="manifest.webmanifest">
-  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.json">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#" aria-label="FocusTube home"><span class="brand-mark">F</span> FocusTube</a>
-    <span class="privacy-note">Your list stays on this device</span>
+    <a class="brand" href="#">
+      <span class="brand-icon">F</span>
+      FocusTube
+    </a>
+    <button id="settings-toggle" class="icon-button" aria-label="Settings">⚙</button>
   </header>
 
   <main class="shell">
-    <section class="intro">
-      <p class="eyebrow">YOUR VIDEOS. YOUR RULES.</p>
-      <h1>A quieter way to watch.</h1>
-      <p class="sub">Only videos from channels you approve. No Shorts feed, trending page, or algorithmic recommendations.</p>
+    <section class="welcome">
+      <p class="eyebrow">YOUR PERSONAL VIDEO LIBRARY</p>
+      <h1>Watch with purpose.</h1>
+      <p>Only the channels and videos you approve.</p>
     </section>
 
-    <section class="panel add-panel">
-      <div class="section-heading">
-        <div><h2>Approve a channel</h2><p>Paste a YouTube channel link. You choose what gets in.</p></div>
-        <span class="lock">CHANNELS ONLY</span>
-      </div>
-      <form id="channel-form" class="add-form">
-        <input id="channel-url" type="url" placeholder="https://www.youtube.com/@channelname" autocomplete="url" required>
-        <button type="submit">Approve channel</button>
+    <section class="add-panel">
+      <h2>Add to your library</h2>
+      <form id="channel-form">
+        <input id="channel-url" type="text"
+          placeholder="YouTube channel URL or @handle" required>
+        <button type="submit">Add channel</button>
       </form>
-      <p id="add-status" class="status" aria-live="polite">Add a channel to create your personal feed.</p>
-    </section>
-
-    <section class="toolbar">
-      <div><h2>Your library</h2><p id="feed-count">No approved channels yet</p></div>
-      <div class="toolbar-actions">
-        <input id="filter-input" class="filter" type="search" placeholder="Filter your library…" aria-label="Filter videos">
-        <button id="settings-toggle" class="quiet-button" type="button">Settings</button>
-      </div>
-    </section>
-
-    <section id="settings-panel" class="panel settings-panel" hidden>
-      <h2>YouTube Data API</h2>
-      <p>To load channel uploads, add your own YouTube Data API v3 key. It is stored only in this browser. Without a key, approved channels are saved but their videos cannot be listed automatically.</p>
-      <form id="api-form" class="add-form">
-        <input id="api-key" type="password" placeholder="YouTube Data API key" autocomplete="off">
-        <button type="submit">Save key</button>
+      <form id="video-form">
+        <input id="video-url" type="text"
+          placeholder="YouTube video URL" required>
+        <button type="submit">Approve video</button>
       </form>
-      <div class="settings-row">
-        <button id="refresh-button" class="quiet-button" type="button">Refresh approved channels</button>
-        <button id="export-button" class="quiet-button" type="button">Export my library</button>
-        <label class="import-label quiet-button">Import library<input id="import-file" type="file" accept="application/json"></label>
-      </div>
-      <p class="small-note">Create a key in Google Cloud Console, enable YouTube Data API v3, and restrict the key to your deployed website's referrer. API quotas apply.</p>
+      <p id="add-status" class="status" aria-live="polite"></p>
     </section>
 
-    <section id="channels-wrap" class="channels-wrap" hidden>
-      <h3>Approved channels</h3>
-      <div id="channels-list" class="channels-list"></div>
+    <section id="settings-panel" class="settings-panel" hidden>
+      <h2>Settings</h2>
+      <form id="api-form">
+        <label for="api-key">YouTube Data API key</label>
+        <input id="api-key" type="password" placeholder="Paste API key">
+        <button type="submit">Save API key</button>
+      </form>
+      <div class="settings-actions">
+        <button id="refresh-button" class="secondary">Refresh channels</button>
+        <button id="export-button" class="secondary">Export library</button>
+        <label class="file-button secondary">
+          Import library
+          <input id="import-file" type="file" accept="application/json">
+        </label>
+      </div>
+      <p class="muted small">Your library is stored in this browser. Do not share your API key.</p>
     </section>
 
-    <section id="video-grid" class="video-grid" aria-live="polite">
-      <div class="empty-state">
-        <div class="empty-icon">▤</div>
-        <h3>Your library is empty</h3>
-        <p>Approve a channel above. Its recent uploads will appear here.</p>
+    <nav class="main-nav" aria-label="Library navigation">
+      <button class="nav-button active" data-view="home">
+        Home <span id="home-count">0</span>
+      </button>
+      <button class="nav-button" data-view="saved">
+        Watch Later <span id="saved-count">0</span>
+      </button>
+      <button class="nav-button" data-view="history">
+        History <span id="history-count">0</span>
+      </button>
+      <button class="nav-button" data-view="channels">
+        Channels <span id="channel-count">0</span>
+      </button>
+    </nav>
+
+    <section class="library-section">
+      <div class="library-heading">
+        <div>
+          <p class="eyebrow">YOUR COLLECTION</p>
+          <h2 id="view-title">Home</h2>
+        </div>
+        <input id="filter-input" type="search" placeholder="Search library">
       </div>
+
+      <p id="feed-count" class="muted small"></p>
+      <div id="video-grid" class="video-grid"></div>
+      <div id="channels-list" class="channels-list" hidden></div>
     </section>
   </main>
 
-  <dialog id="player-dialog" class="player-dialog">
-    <div class="player-head"><div><strong id="player-title">Now playing</strong><span id="player-channel"></span></div><button id="close-player" class="close-button" aria-label="Close player">✕</button></div>
-    <div class="player-frame"><iframe id="youtube-player" title="YouTube video player" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe></div>
-    <p class="player-foot">Autoplay is disabled. FocusTube does not load recommendations or comments around the player.</p>
+  <dialog id="player-dialog">
+    <div class="player-header">
+      <div>
+        <h2 id="player-title">Video</h2>
+        <p id="player-channel" class="muted"></p>
+      </div>
+      <button id="close-player" class="icon-button" aria-label="Close">✕</button>
+    </div>
+    <div class="player-frame">
+      <iframe id="youtube-player"
+        title="YouTube video player"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allowfullscreen></iframe>
+    </div>
   </dialog>
 
-  <footer><span>FocusTube · A personal, channel-approved library</span><span>No algorithm. No endless feed.</span></footer>
+  <footer>
+    <p>FocusTube · A quieter way to watch.</p>
+  </footer>
+
   <script src="app.js"></script>
 </body>
 </html>
