@@ -1,11 +1,12 @@
-
 const STORE_KEY = "focustube-library-v1";
 const API_KEY_STORE = "focustube-youtube-api-key";
 
 const state = {
   channels: [],
   videos: [],
+  blockedVideos: [],
   apiKey: "",
+  view: "home",
   filter: ""
 };
 
@@ -13,22 +14,26 @@ const $ = id => document.getElementById(id);
 
 function loadState() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
-    state.channels = Array.isArray(saved.channels) ? saved.channels : [];
-    state.videos = Array.isArray(saved.videos) ? saved.videos : [];
+    const data = JSON.parse(localStorage.getItem(STORE_KEY) || "{}");
+    state.channels = Array.isArray(data.channels) ? data.channels : [];
+    state.videos = Array.isArray(data.videos) ? data.videos : [];
+    state.blockedVideos = Array.isArray(data.blockedVideos)
+      ? data.blockedVideos : [];
   } catch {
     state.channels = [];
     state.videos = [];
+    state.blockedVideos = [];
   }
 
   state.apiKey = localStorage.getItem(API_KEY_STORE) || "";
   $("api-key").value = state.apiKey;
 }
 
-function persist() {
+function saveState() {
   localStorage.setItem(STORE_KEY, JSON.stringify({
     channels: state.channels,
-    videos: state.videos
+    videos: state.videos,
+    blockedVideos: state.blockedVideos
   }));
 }
 
@@ -37,10 +42,67 @@ function setStatus(message, error = false) {
   $("add-status").classList.toggle("error", error);
 }
 
-async function youtube(path, params = {}) {
-  if (!state.apiKey) {
-    throw new Error("Add your YouTube Data API key in Settings.");
+function escapeHTML(value = "") {
+  return String(value).replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[char]);
+}
+
+function extractVideoId(input) {
+  try {
+    const url = new URL(input.trim());
+    const host = url.hostname.replace(/^www\./, "");
+
+    if (host === "youtu.be") return url.pathname.split("/")[1] || null;
+
+    if (!["youtube.com", "m.youtube.com"].includes(host)) return null;
+
+    if (url.pathname === "/watch") return url.searchParams.get("v");
+
+    const match = url.pathname.match(/^\/(shorts|embed|live)\/([^/?]+)/);
+    return match ? match[2] : null;
+  } catch {
+    return null;
   }
+}
+
+function parseChannelUrl(input) {
+  const value = input.trim();
+
+  if (/^@[\w.-]+$/.test(value)) return { handle: value };
+
+  try {
+    const url = new URL(value);
+    const host = url.hostname.replace(/^www\./, "");
+
+    if (!["youtube.com", "m.youtube.com"].includes(host)) return null;
+
+    const path = url.pathname;
+
+    if (path.startsWith("/channel/")) {
+      return { id: path.split("/")[2] };
+    }
+
+    if (path.startsWith("/@")) {
+      return { handle: path.split("/")[1] };
+    }
+
+    if (path.startsWith("/user/")) {
+      return { username: path.split("/")[2] };
+    }
+
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function apiRequest(endpoint, params) {
+  if (!state.apiKey) throw new Error("Save your YouTube API key in Settings first.");
 
   const query = new URLSearchParams({
     ...params,
@@ -48,7 +110,7 @@ async function youtube(path, params = {}) {
   });
 
   const response = await fetch(
-    `https://www.googleapis.com/youtube/v3/${path}?${query}`
+    `https://www.googleapis.com/youtube/v3/${endpoint}?${query}`
   );
 
   const data = await response.json();
@@ -60,453 +122,249 @@ async function youtube(path, params = {}) {
   return data;
 }
 
-// CHANNEL APPROVAL
-
-function parseChannelUrl(raw) {
-  let url;
-
-  try {
-    url = new URL(raw.trim());
-  } catch {
-    throw new Error("Enter a valid YouTube channel URL.");
-  }
-
-  if (!["youtube.com", "www.youtube.com", "m.youtube.com"].includes(url.hostname)) {
-    throw new Error("Please enter a YouTube channel URL.");
-  }
-
-  const parts = url.pathname.split("/").filter(Boolean);
-
-  if (parts[0]?.startsWith("@")) {
-    return { kind: "handle", handle: parts[0].slice(1) };
-  }
-
-  if (parts[0] === "channel" && parts[1]) {
-    return { kind: "id", id: parts[1] };
-  }
-
-  if (parts[0] === "user" && parts[1]) {
-    return { kind: "username", username: parts[1] };
-  }
-
-  throw new Error("Use a /@handle or /channel/UC... link.");
-}
-
 async function resolveChannel(input) {
-  let params;
+  const parsed = parseChannelUrl(input);
+  if (!parsed) throw new Error("Enter a valid channel URL or @handle.");
 
-  if (input.kind === "handle") {
-    params = { forHandle: input.handle };
-  } else if (input.kind === "id") {
-    params = { id: input.id };
-  } else {
-    params = { forUsername: input.username };
-  }
-
-  const data = await youtube("channels", {
+  let params = {
     part: "snippet,contentDetails",
-    ...params
-  });
+    maxResults: "1"
+  };
 
-  if (!data.items?.length) {
-    throw new Error("Channel not found. Check the link.");
-  }
+  if (parsed.id) params.id = parsed.id;
+  else if (parsed.handle) params.forHandle = parsed.handle;
+  else if (parsed.username) params.forUsername = parsed.username;
 
-  return data.items[0];
-}
+  const data = await apiRequest("channels", params);
+  if (!data.items?.length) throw new Error("Channel not found.");
 
-async function addChannel(event) {
-  event.preventDefault();
+  const channel = data.items[0];
 
-  const button = $("channel-form").querySelector("button");
-  button.disabled = true;
-  button.textContent = "Checking…";
-
-  try {
-    const parsed = parseChannelUrl($("channel-url").value);
-    const channel = await resolveChannel(parsed);
-
-    if (state.channels.some(c => c.id === channel.id)) {
-      throw new Error("This channel is already approved.");
-    }
-
-    state.channels.unshift({
-      id: channel.id,
-      title: channel.snippet.title,
-      thumbnail: channel.snippet.thumbnails?.default?.url || "",
-      uploads: channel.contentDetails.relatedPlaylists.uploads,
-      url: `https://www.youtube.com/channel/${channel.id}`
-    });
-
-    persist();
-    $("channel-url").value = "";
-    renderChannels();
-
-    setStatus(`Approved ${channel.snippet.title}. Loading uploads…`);
-
-    await refreshChannel(channel.id);
-    renderVideos();
-
-    setStatus(`Approved ${channel.snippet.title}.`);
-  } catch (error) {
-    setStatus(error.message, true);
-  } finally {
-    button.disabled = false;
-    button.textContent = "Approve channel";
-  }
-}
-
-// VIDEO DATA
-
-function videoRecord(video, existing = {}) {
   return {
-    id: video.id,
-    channelId: video.snippet.channelId,
-    title: video.snippet.title,
-    channelTitle: video.snippet.channelTitle,
-    publishedAt: video.snippet.publishedAt,
-    thumbnail:
-      video.snippet.thumbnails?.medium?.url ||
-      video.snippet.thumbnails?.default?.url ||
-      "",
-    duration: video.contentDetails.duration,
-    saved: existing.saved || false,
-    watched: existing.watched || false,
-    individualApproved: existing.individualApproved || false
+    id: channel.id,
+    title: channel.snippet.title,
+    thumbnail: channel.snippet.thumbnails?.default?.url || "",
+    uploadsId: channel.contentDetails.relatedPlaylists.uploads
   };
 }
 
-// LOAD ALL CHANNEL UPLOADS USING PAGINATION
+function makeVideoRecord(video, channel = null) {
+  const existing = state.videos.find(v => v.id === video.id);
 
-async function refreshChannel(channelId) {
-  const channel = state.channels.find(c => c.id === channelId);
-  if (!channel) return;
+  return {
+    id: video.id,
+    title: video.snippet?.title || existing?.title || "Untitled video",
+    channelId: video.snippet?.channelId || channel?.id || existing?.channelId || "",
+    channelTitle: video.snippet?.channelTitle || channel?.title || existing?.channelTitle || "",
+    thumbnail:
+      video.snippet?.thumbnails?.medium?.url ||
+      video.snippet?.thumbnails?.default?.url ||
+      existing?.thumbnail || "",
+    publishedAt: video.snippet?.publishedAt || existing?.publishedAt || "",
+    saved: existing?.saved || false,
+    watched: existing?.watched || false,
+    watchedAt: existing?.watchedAt || null,
+    individualApproved: existing?.individualApproved || false
+  };
+}
 
+async function fetchChannelVideos(channel) {
   let pageToken = "";
-  const existingById = new Map(state.videos.map(v => [v.id, v]));
-  const refreshed = new Map();
+  const ids = [];
 
   do {
     const params = {
-      part: "snippet,contentDetails",
-      playlistId: channel.uploads,
+      part: "snippet",
+      playlistId: channel.uploadsId,
       maxResults: "50"
     };
 
     if (pageToken) params.pageToken = pageToken;
 
-    const playlist = await youtube("playlistItems", params);
+    const data = await apiRequest("playlistItems", params);
 
-    const ids = (playlist.items || [])
-      .map(item => item.contentDetails?.videoId)
-      .filter(Boolean);
-
-    if (ids.length) {
-      const details = await youtube("videos", {
-        part: "snippet,contentDetails",
-        id: ids.join(",")
-      });
-
-      details.items.forEach(video => {
-        if (video.snippet.channelId !== channelId) return;
-
-        const old = existingById.get(video.id) || {};
-        refreshed.set(video.id, videoRecord(video, old));
-      });
+    for (const item of data.items || []) {
+      const id = item.snippet?.resourceId?.videoId;
+      if (id && !state.blockedVideos.includes(id)) ids.push(id);
     }
 
-    pageToken = playlist.nextPageToken || "";
+    pageToken = data.nextPageToken || "";
   } while (pageToken);
 
-  // Keep individually approved videos even if not in this channel.
-  const otherVideos = state.videos.filter(
-    v => v.channelId !== channelId && v.individualApproved
-  );
+  const videos = [];
 
-  // Preserve individually approved videos from this channel too.
-  state.videos.forEach(v => {
-    if (v.channelId === channelId && v.individualApproved && !refreshed.has(v.id)) {
-      refreshed.set(v.id, v);
-    }
-  });
+  for (let i = 0; i < ids.length; i += 50) {
+    const batch = ids.slice(i, i + 50);
 
-  state.videos = [...otherVideos, ...refreshed.values()]
-    .sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const data = await apiRequest("videos", {
+      part: "snippet",
+      id: batch.join(","),
+      maxResults: "50"
+    });
 
-  persist();
+    videos.push(...data.items.map(video => makeVideoRecord(video, channel)));
+  }
+
+  return videos;
 }
 
-// INDIVIDUAL VIDEO APPROVAL
-
-function extractVideoId(raw) {
-  let url;
+async function addChannel(event) {
+  event.preventDefault();
+  const input = $("channel-url").value.trim();
 
   try {
-    url = new URL(raw.trim());
-  } catch {
-    throw new Error("Enter a valid YouTube video link.");
-  }
+    setStatus("Finding channel...");
+    const channel = await resolveChannel(input);
 
-  let id = "";
-
-  if (url.hostname === "youtu.be") {
-    id = url.pathname.split("/").filter(Boolean)[0] || "";
-  } else if (
-    ["youtube.com", "www.youtube.com", "m.youtube.com"].includes(url.hostname)
-  ) {
-    if (url.pathname === "/watch") {
-      id = url.searchParams.get("v") || "";
-    } else {
-      const parts = url.pathname.split("/").filter(Boolean);
-
-      if (["shorts", "embed", "live"].includes(parts[0])) {
-        id = parts[1] || "";
-      }
+    if (state.channels.some(c => c.id === channel.id)) {
+      setStatus("This channel is already approved.");
+      return;
     }
-  }
 
-  if (!/^[a-zA-Z0-9_-]{11}$/.test(id)) {
-    throw new Error("Couldn't find a valid video in that link.");
-  }
+    setStatus("Loading channel videos...");
+    const videos = await fetchChannelVideos(channel);
 
-  return id;
+    state.channels.push(channel);
+
+    const byId = new Map(state.videos.map(v => [v.id, v]));
+    videos.forEach(v => {
+      const old = byId.get(v.id);
+      byId.set(v.id, { ...v, ...old, channelId: channel.id });
+    });
+
+    state.videos = [...byId.values()];
+    saveState();
+    render();
+
+    $("channel-url").value = "";
+    setStatus(`Approved ${channel.title}. Loaded ${videos.length} videos.`);
+  } catch (error) {
+    setStatus(error.message, true);
+  }
 }
 
 async function approveVideo(event) {
   event.preventDefault();
+  const id = extractVideoId($("video-url").value);
 
-  const button = $("video-approval-form").querySelector("button");
-  button.disabled = true;
-  button.textContent = "Checking…";
+  if (!id) {
+    setStatus("Enter a valid YouTube video link.", true);
+    return;
+  }
 
   try {
-    const id = extractVideoId($("video-url").value);
-
-    const data = await youtube("videos", {
-      part: "snippet,contentDetails",
+    setStatus("Checking video...");
+    const data = await apiRequest("videos", {
+      part: "snippet",
       id
     });
 
-    if (!data.items?.length) {
-      throw new Error("Video not found or unavailable.");
-    }
+    if (!data.items?.length) throw new Error("Video not found or unavailable.");
 
-    const video = data.items[0];
-    const existing = state.videos.find(v => v.id === id) || {};
+    const video = makeVideoRecord(data.items[0]);
+    video.individualApproved = true;
 
-    const record = videoRecord(video, existing);
-    record.individualApproved = true;
+    state.blockedVideos = state.blockedVideos.filter(x => x !== id);
 
-    state.videos = [
-      record,
-      ...state.videos.filter(v => v.id !== id)
-    ].sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+    const index = state.videos.findIndex(v => v.id === id);
+    if (index >= 0) state.videos[index] = video;
+    else state.videos.push(video);
 
-    persist();
+    saveState();
+    render();
+
     $("video-url").value = "";
-    renderVideos();
-
-    $("video-approval-status").textContent =
-      `Approved: ${record.title}`;
+    setStatus("Video approved and added to your library.");
   } catch (error) {
-    $("video-approval-status").textContent = error.message;
-  } finally {
-    button.disabled = false;
-    button.textContent = "Approve video";
+    setStatus(error.message, true);
   }
 }
 
-// REFRESH
-
-async function refreshAll() {
-  if (!state.channels.length) {
-    setStatus("Approve a channel first.");
-    return;
-  }
-
-  setStatus("Refreshing approved channels…");
-
-  let failures = [];
-
-  for (const channel of [...state.channels]) {
-    try {
-      await refreshChannel(channel.id);
-    } catch (error) {
-      failures.push(`${channel.title}: ${error.message}`);
-    }
-  }
-
-  renderVideos();
-
-  if (failures.length) {
-    setStatus(failures.join(" | "), true);
-  } else {
-    setStatus("All approved channels refreshed.");
-  }
-}
-
-// CHANNEL DISPLAY
-
-function renderChannels() {
-  $("channels-wrap").hidden = !state.channels.length;
-  $("channels-list").innerHTML = "";
-
-  state.channels.forEach(channel => {
-    const chip = document.createElement("div");
-    chip.className = "channel-chip";
-
-    const name = document.createElement("span");
-    name.textContent = channel.title;
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.textContent = "×";
-    remove.title = `Remove ${channel.title}`;
-
-    remove.addEventListener("click", () => {
-      if (!confirm(`Remove ${channel.title} and its channel-approved videos?`)) {
-        return;
-      }
-
-      state.channels = state.channels.filter(c => c.id !== channel.id);
-
-      // Individually approved videos remain.
-      state.videos = state.videos.filter(
-        v => v.channelId !== channel.id || v.individualApproved
-      );
-
-      persist();
-      renderChannels();
-      renderVideos();
-    });
-
-    chip.append(name, remove);
-    $("channels-list").append(chip);
-  });
-
-  updateCount();
-}
-
-function updateCount() {
-  $("feed-count").textContent =
-    `${state.videos.filter(v =>
-      state.channels.some(c => c.id === v.channelId) || v.individualApproved
-    ).length} videos · ${state.channels.length} approved channels`;
-}
-
-// VIDEO DISPLAY
-
-function renderVideos() {
-  const grid = $("video-grid");
-  grid.innerHTML = "";
-
-  const query = state.filter.toLowerCase();
-
-  const videos = state.videos.filter(video => {
-    const approved =
-      state.channels.some(c => c.id === video.channelId) ||
-      video.individualApproved;
-
-    return approved &&
-      (!query ||
-        `${video.title} ${video.channelTitle}`.toLowerCase().includes(query));
-  });
-
-  updateCount();
-
-  if (!videos.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-state";
-
-    empty.innerHTML = `
-      <div class="empty-icon">▤</div>
-      <h3>${state.channels.length ? "No matching videos" : "Your library is empty"}</h3>
-      <p>Approve a channel or an individual video to get started.</p>
-    `;
-
-    grid.append(empty);
-    return;
-  }
+async function refreshChannel(channel) {
+  const videos = await fetchChannelVideos(channel);
+  const byId = new Map(state.videos.map(v => [v.id, v]));
 
   videos.forEach(video => {
-    const card = document.createElement("article");
-    card.className = "video-card";
-
-    const thumb = document.createElement("div");
-    thumb.className = "thumb-wrap";
-    thumb.tabIndex = 0;
-    thumb.setAttribute("role", "button");
-    thumb.setAttribute("aria-label", `Play ${video.title}`);
-
-    const img = document.createElement("img");
-    img.src = video.thumbnail;
-    img.alt = "";
-    img.loading = "lazy";
-
-    const play = document.createElement("span");
-    play.className = "play-mark";
-    play.textContent = "▶";
-
-    thumb.append(img, play);
-
-    const info = document.createElement("div");
-    info.className = "video-info";
-
-    const title = document.createElement("div");
-    title.className = "video-title";
-    title.textContent = video.title;
-
-    const channel = document.createElement("div");
-    channel.className = "video-channel";
-    channel.textContent = video.channelTitle;
-
-    const actions = document.createElement("div");
-    actions.className = "video-actions";
-
-    const watch = document.createElement("button");
-    watch.textContent = "Watch";
-    watch.addEventListener("click", () => openPlayer(video));
-
-    const save = document.createElement("button");
-    save.textContent = video.saved ? "✓ Saved" : "＋ Watch later";
-    save.className = video.saved ? "saved" : "";
-
-    save.addEventListener("click", () => {
-      video.saved = !video.saved;
-      persist();
-      renderVideos();
-    });
-
-    actions.append(watch, save);
-    info.append(title, channel, actions);
-    card.append(thumb, info);
-
-    thumb.addEventListener("click", () => openPlayer(video));
-
-    thumb.addEventListener("keydown", event => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        openPlayer(video);
-      }
-    });
-
-    grid.append(card);
+    const old = byId.get(video.id);
+    byId.set(video.id, { ...video, ...old, channelId: channel.id });
   });
+
+  state.videos = [...byId.values()];
 }
 
-// PLAYER
+async function refreshAll() {
+  const button = $("refresh-button");
+  button.disabled = true;
 
-function openPlayer(video) {
-  $("player-title").textContent = video.title;
-  $("player-channel").textContent = video.channelTitle;
+  try {
+    for (const channel of state.channels) {
+      await refreshChannel(channel);
+    }
+
+    saveState();
+    render();
+    setStatus("All approved channels refreshed.");
+  } catch (error) {
+    saveState();
+    render();
+    setStatus(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function removeChannel(id) {
+  const channel = state.channels.find(c => c.id === id);
+  if (!channel || !confirm(`Remove ${channel.title} from approved channels?`)) return;
+
+  state.channels = state.channels.filter(c => c.id !== id);
+
+  // Keep videos individually approved by the user.
+  state.videos = state.videos.filter(v =>
+    v.channelId !== id || v.individualApproved
+  );
+
+  saveState();
+  render();
+}
+
+function removeVideo(id) {
+  const video = state.videos.find(v => v.id === id);
+  if (!video) return;
+
+  if (!confirm("Remove this video from your library?")) return;
+
+  state.blockedVideos.push(id);
+  state.videos = state.videos.filter(v => v.id !== id);
+
+  saveState();
+  render();
+}
+
+function toggleSaved(id) {
+  const video = state.videos.find(v => v.id === id);
+  if (!video) return;
+
+  video.saved = !video.saved;
+  saveState();
+  render();
+}
+
+function openVideo(id) {
+  const video = state.videos.find(v => v.id === id);
+  if (!video) return;
 
   video.watched = true;
-  persist();
+  video.watchedAt = new Date().toISOString();
 
+  $("player-title").textContent = video.title;
+  $("player-channel").textContent = video.channelTitle;
   $("youtube-player").src =
-    `https://www.youtube-nocookie.com/embed/${encodeURIComponent(video.id)}?autoplay=0&rel=0&modestbranding=1`;
+    `https://www.youtube-nocookie.com/embed/${encodeURIComponent(id)}?autoplay=1`;
 
   $("player-dialog").showModal();
+  saveState();
+  renderCounts();
 }
 
 function closePlayer() {
@@ -514,94 +372,159 @@ function closePlayer() {
   $("player-dialog").close();
 }
 
-// ADD VIDEO APPROVAL FORM TO EXISTING PAGE
+function setView(view) {
+  state.view = view;
+  document.querySelectorAll(".nav-button").forEach(button => {
+    button.classList.toggle("active", button.dataset.view === view);
+  });
 
-function createVideoApprovalForm() {
-  const section = document.createElement("section");
-  section.className = "panel add-panel";
+  const titles = {
+    home: "Home",
+    saved: "Watch Later",
+    history: "History",
+    channels: "Channels"
+  };
 
-  section.innerHTML = `
-    <div class="section-heading">
-      <div>
-        <h2>Approve an individual video</h2>
-        <p>Allow one video without approving its entire channel.</p>
-      </div>
-      <span class="lock">VIDEO ONLY</span>
-    </div>
-    <form id="video-approval-form" class="add-form">
-      <input id="video-url" type="url"
-        placeholder="Paste a YouTube video link"
-        autocomplete="url" required>
-      <button type="submit">Approve video</button>
-    </form>
-    <p id="video-approval-status" class="status" aria-live="polite">
-      Only videos you approve will appear here.
-    </p>
-  `;
+  $("view-title").textContent = titles[view];
+  $("filter-input").placeholder =
+    view === "channels" ? "Search channels" : "Search library";
 
-  $("channel-form").closest(".panel").after(section);
-
-  $("video-approval-form").addEventListener("submit", approveVideo);
+  render();
 }
 
-// EVENTS
+function getVisibleVideos() {
+  const query = state.filter.toLowerCase();
 
-$("channel-form").addEventListener("submit", addChannel);
+  let videos = state.videos.filter(video =>
+    !state.blockedVideos.includes(video.id)
+  );
 
-$("settings-toggle").addEventListener("click", () => {
-  $("settings-panel").hidden = !$("settings-panel").hidden;
-});
-
-$("api-form").addEventListener("submit", event => {
-  event.preventDefault();
-
-  state.apiKey = $("api-key").value.trim();
-
-  if (state.apiKey) {
-    localStorage.setItem(API_KEY_STORE, state.apiKey);
-  } else {
-    localStorage.removeItem(API_KEY_STORE);
+  if (state.view === "saved") videos = videos.filter(v => v.saved);
+  if (state.view === "history") {
+    videos = videos.filter(v => v.watched);
+    videos.sort((a, b) =>
+      new Date(b.watchedAt || 0) - new Date(a.watchedAt || 0)
+    );
   }
 
-  setStatus(
-    state.apiKey
-      ? "API key saved on this device."
-      : "API key cleared."
+  if (query) {
+    videos = videos.filter(v =>
+      `${v.title} ${v.channelTitle}`.toLowerCase().includes(query)
+    );
+  }
+
+  return videos;
+}
+
+function renderCounts() {
+  const available = state.videos.filter(v =>
+    !state.blockedVideos.includes(v.id)
   );
-});
 
-$("refresh-button").addEventListener("click", refreshAll);
+  $("home-count").textContent = available.length;
+  $("saved-count").textContent = available.filter(v => v.saved).length;
+  $("history-count").textContent = available.filter(v => v.watched).length;
+  $("channel-count").textContent = state.channels.length;
+}
 
-$("filter-input").addEventListener("input", event => {
-  state.filter = event.target.value;
-  renderVideos();
-});
+function renderVideos() {
+  const grid = $("video-grid");
+  const videos = getVisibleVideos();
 
-$("close-player").addEventListener("click", closePlayer);
+  $("channels-list").hidden = true;
+  grid.hidden = false;
+  $("feed-count").textContent = `${videos.length} videos`;
 
-$("player-dialog").addEventListener("click", event => {
-  if (event.target === $("player-dialog")) closePlayer();
-});
+  if (!videos.length) {
+    grid.innerHTML = `<div class="empty-state">
+      <h3>Nothing here yet</h3>
+      <p>Approve a channel or individual video to build your library.</p>
+    </div>`;
+    return;
+  }
 
-$("export-button").addEventListener("click", () => {
-  const blob = new Blob([
-    JSON.stringify({
-      channels: state.channels,
-      videos: state.videos
-    }, null, 2)
-  ], { type: "application/json" });
+  grid.innerHTML = videos.map(video => `
+    <article class="video-card">
+      <img class="thumbnail"
+        src="${escapeHTML(video.thumbnail)}"
+        alt=""
+        loading="lazy">
+      <div class="video-info">
+        <div class="video-title">${escapeHTML(video.title)}</div>
+        <div class="video-channel">${escapeHTML(video.channelTitle)}</div>
+      </div>
+      <div class="card-actions">
+        <button data-action="watch" data-id="${escapeHTML(video.id)}">Watch</button>
+        <button class="secondary" data-action="save"
+          data-id="${escapeHTML(video.id)}">
+          ${video.saved ? "Saved ✓" : "Watch later"}
+        </button>
+        <button class="secondary remove" data-action="remove"
+          data-id="${escapeHTML(video.id)}">Remove</button>
+      </div>
+    </article>
+  `).join("");
+}
+
+function renderChannels() {
+  $("video-grid").hidden = true;
+  $("channels-list").hidden = false;
+
+  const query = state.filter.toLowerCase();
+  const channels = state.channels.filter(c =>
+    c.title.toLowerCase().includes(query)
+  );
+
+  $("feed-count").textContent = `${channels.length} approved channels`;
+
+  if (!channels.length) {
+    $("channels-list").innerHTML = `
+      <div class="empty-state">
+        <h3>No approved channels</h3>
+        <p>Add a channel above to start your library.</p>
+      </div>`;
+    return;
+  }
+
+  $("channels-list").innerHTML = channels.map(channel => `
+    <article class="channel-card">
+      <div>
+        <strong>${escapeHTML(channel.title)}</strong>
+        <p class="muted small">Approved channel</p>
+      </div>
+      <button class="secondary" data-action="remove-channel"
+        data-id="${escapeHTML(channel.id)}">Remove</button>
+    </article>
+  `).join("");
+}
+
+function render() {
+  renderCounts();
+
+  if (state.view === "channels") renderChannels();
+  else renderVideos();
+}
+
+function exportLibrary() {
+  const data = {
+    channels: state.channels,
+    videos: state.videos,
+    blockedVideos: state.blockedVideos
+  };
+
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json"
+  });
 
   const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "focustube-library.json";
+  link.click();
+  URL.revokeObjectURL(url);
+}
 
-  a.href = url;
-  a.download = "focustube-library.json";
-  a.click();
-
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-});
-
-$("import-file").addEventListener("change", async event => {
+async function importLibrary(event) {
   const file = event.target.files[0];
   if (!file) return;
 
@@ -609,33 +532,79 @@ $("import-file").addEventListener("change", async event => {
     const data = JSON.parse(await file.text());
 
     if (!Array.isArray(data.channels) || !Array.isArray(data.videos)) {
-      throw new Error();
+      throw new Error("Invalid FocusTube backup.");
+    }
+
+    if (!confirm("Import this library? It will replace your current library.")) {
+      event.target.value = "";
+      return;
     }
 
     state.channels = data.channels;
-    state.videos = data.videos.filter(video =>
-      state.channels.some(c => c.id === video.channelId) ||
-      video.individualApproved === true
-    );
+    state.videos = data.videos;
+    state.blockedVideos = Array.isArray(data.blockedVideos)
+      ? data.blockedVideos : [];
 
-    persist();
-    renderChannels();
-    renderVideos();
-    setStatus("Library imported.");
-  } catch {
-    setStatus("Invalid FocusTube export file.", true);
+    saveState();
+    render();
+    setStatus("Library imported successfully.");
+  } catch (error) {
+    setStatus(error.message, true);
   }
 
   event.target.value = "";
-});
+}
 
-// START APP
+function setupEvents() {
+  $("channel-form").addEventListener("submit", addChannel);
+  $("video-form").addEventListener("submit", approveVideo);
+
+  $("settings-toggle").addEventListener("click", () => {
+    $("settings-panel").hidden = !$("settings-panel").hidden;
+  });
+
+  $("api-form").addEventListener("submit", event => {
+    event.preventDefault();
+    state.apiKey = $("api-key").value.trim();
+    localStorage.setItem(API_KEY_STORE, state.apiKey);
+    setStatus("API key saved in this browser.");
+  });
+
+  $("refresh-button").addEventListener("click", refreshAll);
+  $("export-button").addEventListener("click", exportLibrary);
+  $("import-file").addEventListener("change", importLibrary);
+
+  $("filter-input").addEventListener("input", event => {
+    state.filter = event.target.value;
+    render();
+  });
+
+  document.querySelectorAll(".nav-button").forEach(button => {
+    button.addEventListener("click", () => setView(button.dataset.view));
+  });
+
+  $("video-grid").addEventListener("click", event => {
+    const button = event.target.closest("button[data-action]");
+    if (!button) return;
+
+    const { action, id } = button.dataset;
+
+    if (action === "watch") openVideo(id);
+    if (action === "save") toggleSaved(id);
+    if (action === "remove") removeVideo(id);
+  });
+
+  $("channels-list").addEventListener("click", event => {
+    const button = event.target.closest("button[data-action='remove-channel']");
+    if (button) removeChannel(button.dataset.id);
+  });
+
+  $("close-player").addEventListener("click", closePlayer);
+  $("player-dialog").addEventListener("click", event => {
+    if (event.target === $("player-dialog")) closePlayer();
+  });
+}
 
 loadState();
-createVideoApprovalForm();
-renderChannels();
-renderVideos();
-
-if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
-  navigator.serviceWorker.register("./sw.js").catch(() => {});
-}
+setupEvents();
+render();
